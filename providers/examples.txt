@@ -1,0 +1,71 @@
+# the whole file is a definition of a space:
+
+[package pip]
+    _provider: SysPkgProvider
+    name: pip
+
+[pythonpackage]
+    _use: [package pip]
+    _provider: PipProvider
+
+[pythonpackage virtualenv]
+    _provider: SysPkgProvider
+    name: virtualenv
+    version: 1.2.2
+
+[pythonpackage paramiko]
+    _provider: SysPkgProvider
+    name: paramiko
+    version: 1.0.0
+
+[pythonpackage pytest]
+    _use: [virtualenv test]
+    name: pytest
+    version: 1.0.0
+
+[virtualenv]
+    _use: [pythonpackage virtualenv]
+    _provider: VirtualenvProvider
+
+[virtualenv test]
+    path: [env test]:$WORKSPACE/venv
+
+[repo test]
+    _provider: GitProvider
+    path: [env test]:$WORKSPACE
+    origin: ssh://example.com/test.git
+    ignore: [virtualenv test]:path
+
+[env test]
+    _provider: EnvProvider
+    WORKSPACE: ~/workspace/test
+
+#will result in list of provider instances:
+[project test] requires [repo test], [env test], [pythonpackage paramiko], [pythonpackage pytest], [virtualenv test]
+[pythonpackage pytest] requires [virtualenv test]
+[repo test] requires [env test], [virtualenv test]
+[virtualenv test] requires [pythonpackage virtualenv] [env test]
+[env test] requires nothing
+[pythonpackage paramiko] requires nothing
+[pythonpackage virtualenv] requires nothing
+
+#expected order of provide commands
+1. [pythonpackage virtualenv] [pythonpackage paramiko] [env test]
+2. [virtualenv test]
+3. [repo test] [pythonpackage pytest],
+
+# one way it would outupt something like
+# (some things migng
+$spaces test
+sudo apt-get install -y python-virtualenv==1.2.2 python-paramiko==1.0.0 [ok]
+export WORKSPACE=~/workspace/test [ok]
+mkdir -p $WORKSPACE [skipped]
+virtualenv $WORKSPACE/venv [ok]
+source $WORKSPACE/venv/bin/activate [ok]
+cd $WORKSPACE [ok]
+git init [skipped]
+git remote add origin ssh://example.com/test.git [skipped]
+git fetch [ok]
+git checkout -t origin/master [skipped]
+pip install pytest==1.0.0 [ok]
+
