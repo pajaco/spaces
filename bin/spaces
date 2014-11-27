@@ -1,0 +1,24 @@
+#!/bin/bash
+
+spaces(){
+    # commands list, enter, leave, describe
+    if [ "$1" = "list" ]; then
+        list-spaces
+    fi
+}
+
+list-spaces(){
+    spaces=$(ls ~/.spaces/scripts)
+    if [ "$spaces" = "" ]; then
+        echo "No spaces defined"
+    else
+        echo $spaces
+    fi
+}
+list-spacedefs(){
+    spaces=$(ls ~/.spaces/defs)
+}
+#_get_spacedef() {
+    #name=$1
+    #file=~/.spaces/$name
+#}
