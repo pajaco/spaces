@@ -149,7 +149,7 @@ class GitProvider(object):
     def __init__(self, space, **kwargs):
         self.path = kwargs['path']
         self.origin = kwargs['origin']
-        self.ignore = [] # private ignore, doesn't go to .gitignore
+        self.ignore = []  # private ignore, goes to .git/info/exclude
         for ignore in kwargs.get('ignore', []):
             if ignore.startswith(self.path):
                 self.ignore.append(ignore[len(self.path):])
@@ -183,29 +183,48 @@ class GitProvider(object):
         return out
 
 
+class ProvideScriptBuilder(object):
+    def __init__(self, *providers):
+        self.providers = providers or []
+        self.show_tests = True
+        self.show_skipped = True
+
+    def _marshall_script_parts(self, data):
+        if isinstance(data, tuple):
+            return [data]
+        elif data is None:
+            return [(None, None, None)]
+        return data
+
+    def build(self):
+        out = []
+        for provider in self.providers:
+            provide = self._marshall_script_parts(provider.provide())
+            revert = self._marshall_script_parts(provider.revert())
+            # TODO lengths probably need to be the same
+            for i in range(len(provide)):
+                prov_test, prov_ifpass, prov_iffail = provide[i]
+                rev_test, rev_ifpass, rev_iffail = revert[i]
+        return out
+
 if __name__ == "__main__":
-    import ipdb;
     # TODO integration tests make more sense but for now...
     env_provider = EnvProvider('testspace', A='$TMP/blah', TMP='/tmp')
     provided = env_provider.provide()
-    expected = [
-            ('test -z "$TMP"', 'export TMP=/tmp',
-                '_SPACES_testspace_TMP=$TMP && export TMP=/tmp'),
-            ('test -z "$A"', 'export A=$TMP/blah',
-                '_SPACES_testspace_A=$A && export A=$TMP/blah')
-            ]
+    expected = [('test -z "$TMP"', 'export TMP=/tmp',
+                 '_SPACES_testspace_TMP=$TMP && export TMP=/tmp'),
+                ('test -z "$A"', 'export A=$TMP/blah',
+                 '_SPACES_testspace_A=$A && export A=$TMP/blah')]
     assert expected == provided
     reverted = env_provider.revert()
-    expected = [
-            ('env | grep _SPACES_testspace_TMP',
-             ('export TMP=$_SPACES_testspace_TMP; '
-              'unset _SPACES_testspace_TMP'),
-             'unset _SPACES_testspace_TMP'),
-            ('env | grep _SPACES_testspace_A',
-             ('export A=$_SPACES_testspace_A; '
-              'unset _SPACES_testspace_A'),
-             'unset _SPACES_testspace_A'),
-            ]
+    expected = [('env | grep _SPACES_testspace_TMP',
+                 ('export TMP=$_SPACES_testspace_TMP; '
+                  'unset _SPACES_testspace_TMP'),
+                 'unset _SPACES_testspace_TMP'),
+                ('env | grep _SPACES_testspace_A',
+                 ('export A=$_SPACES_testspace_A; '
+                  'unset _SPACES_testspace_A'),
+                 'unset _SPACES_testspace_A'), ]
     assert expected == reverted
 
     venv_provider = VirtualenvProvider('testspace', path='~/env')
@@ -228,8 +247,7 @@ if __name__ == "__main__":
                                ignore=['*.swp'])
     result = git_provider.provide()
     expected = [('test ! -d ~/spaces',
-                 'git clone git@github.com/pajaco/spaces ~/spaces',
-                 None),
+                 'git clone git@github.com/pajaco/spaces ~/spaces', None),
                 (("popd ~/spaces && "
                   "rc=$(git rev-parse --is-inside-work-tree) && "
                   "popd; test $rc"),
