@@ -16,26 +16,28 @@ Each provider stores the state it found initially for the revert action.
 Providers shouldn't rely on doing own tests of state as their output once
 generated needs to be self-sufficient.
 """
-from distutils.spawn import find_executable
+import os
 
 
 class EnvProvider(object):
     """Provides setting and exporting environment variables"""
     def __init__(self, space, **kwargs):
         self.space = space
-        # TODO order them so that env vars containing other will be processed
-        # later
         self._env_vars = kwargs
-        self.bac_preamble = "_SPACES_{0}_" % self.space
+        self.bac_preamble = "_SPACES_%s_" % self.space
+
 
     def provide(self):
         # check if variable set, back up if yes, export new one
+        keys = self._env_vars.keys()
+        # ensure variables having other baked in go to the end of queue
+        keys.sort(cmp=lambda x, y: -1 if x in self._env_vars[y] else 0)
         out = []
         for k, v in self._env_vars.items():
-            test = "test -z \"$%s\""
+            test = "test -z \"$%s\"" % k
             positive = "export {0}={1}".format(k, v)
-            negative = "".join(self.bac_preamble,
-                               "{0}={1} && {2}".format(k, v, positive))
+            negative = "".join([self.bac_preamble,
+                               "{0}=${0} && {1}".format(k, positive)])
             out.append((test, positive, negative))
         return out
         
@@ -46,34 +48,40 @@ class EnvProvider(object):
             positive = "export {0}=${1}{0}; unset {1}{0}".format(
                     k, self.bac_preamble)
             negative = "unset {0}{1}".format(self.bac_preamble, k)
-            out.append(test, positive, negative)
+            out.append((test, positive, negative))
         return out
 
+
 class VirtualenvProvider(object):
-    def __init__(self, **kwargs):
+    def __init__(self, space, **kwargs):
+        self.space = space
         self.path = kwargs['path']
 
     def check_dependency(self):
         return "which virtualenv"
 
     def provide(self):
-        test = "test -d %s -a -f %s/bin/activate" % (self.path, self.path)
-        positive = "source %s/bin/activate" % self.path
-        negative = " && ".join([
-            "virtualenv %s" % self.path,
-            positive
-            ])
+        test = 'test -d %s -a -f %s/bin/activate' % (self.path, self.path)
+        positive = 'source %s/bin/activate' % self.path
+        negative = ' && '.join(['virtualenv %s' % self.path,
+                                positive])
         return test, positive, negative
+
+    def revert(self):
+        test = 'env | grep VIRTUAL_ENV=%s' % self.path
+        positive = 'deactivate'
+        return test, positive, None
 
 
 class PkgProvider(object):
     """Base class for package handling"""
-    def __init__(self, **kwargs):
+    def __init__(self, space, **kwargs):
+        self.space = space
         self.name = kwargs['name']
         self.version = kwargs['version']
 
     def revert(self):
-        return None, None, None
+        return None
 
     concrete_implementations = set()
 
@@ -122,10 +130,10 @@ PkgProvider.concrete_implementations.add(DebPkgProvider)
 
 
 class GitProvider(object):
-    def __init__(self, **kwargs):
+    def __init__(self, space, **kwargs):
         self.path = kwargs['path']
         self.origin = kwargs['origin']
-        self.ignore = []
+        self.ignore = [] # private ignore, doesn't go to .gitignore
         for ignore in kwargs.get('ignore', []):
             if ignore.startswith(self.path):
                 self.ignore.append(ignore[len(self.path):])
@@ -134,13 +142,87 @@ class GitProvider(object):
 
 
     def provide(self):
+        out = []
+        # no repo, no dir
         test = "test ! -d {0}".format(self.path)
         positive = "git clone {0} {1}".format(self.origin, self.path)
-        # TODO handle ignore here
+        out.append((test, positive, None))
+        # dir but no repo
+        # TODO should it be created at this point???
+        test = ("popd {0} && rc=$(git rev-parse --is-inside-work-tree) "
+                "&& popd; test $rc").format(self.path)
+
         negative = ["pushd {0}",
                     "git init",
                     "git remote add origin {1}",
-                    "git checkout -t origin/master"
+                    "git checkout -t origin/master",
                     "popd"]
         negative = " && ".join(negative).format(self.path, self.origin)
-        return test, positive, negative
+        out.append((test, None, negative))
+        # ignore
+        exclude_path = os.path.join(self.path, ".git/info/exclude")
+        for ignore in self.ignore:
+            test = "grep '%s' %s" % (ignore, exclude_path)
+            negative = "cat >>{0} <<EOF{1}\nEOF".format(exclude_path, ignore)
+            out.append((test, None, negative))
+        return out
+
+
+if __name__ == "__main__":
+    import ipdb;
+    # TODO integration tests make more sense but for now...
+    env_provider = EnvProvider('testspace', A='$TMP/blah', TMP='/tmp')
+    provided = env_provider.provide()
+    expected = [
+            ('test -z "$TMP"', 'export TMP=/tmp',
+                '_SPACES_testspace_TMP=$TMP && export TMP=/tmp'),
+            ('test -z "$A"', 'export A=$TMP/blah',
+                '_SPACES_testspace_A=$A && export A=$TMP/blah')
+            ]
+    assert expected == provided
+    reverted = env_provider.revert()
+    expected = [
+            ('env | grep _SPACES_testspace_TMP',
+             ('export TMP=$_SPACES_testspace_TMP; '
+              'unset _SPACES_testspace_TMP'),
+             'unset _SPACES_testspace_TMP'),
+            ('env | grep _SPACES_testspace_A',
+             ('export A=$_SPACES_testspace_A; '
+              'unset _SPACES_testspace_A'),
+             'unset _SPACES_testspace_A'),
+            ]
+    assert expected == reverted
+
+    venv_provider = VirtualenvProvider('testspace', path='~/env')
+    assert 'which virtualenv' == venv_provider.check_dependency()
+    provided = venv_provider.provide()
+    expected = ('test -d ~/env -a -f ~/env/bin/activate',
+                'source ~/env/bin/activate',
+                ('virtualenv ~/env && '
+                 'source ~/env/bin/activate'))
+    assert expected == provided
+    reverted = venv_provider.revert()
+    expected = ('env | grep VIRTUAL_ENV=~/env',
+                'deactivate',
+                None)
+    assert expected == reverted
+
+    git_provider = GitProvider('testspace',
+                               origin='git@github.com/pajaco/spaces',
+                               path='~/spaces',
+                               ignore=['*.swp'])
+    result = git_provider.provide()
+    expected = [('test ! -d ~/spaces',
+                 'git clone git@github.com/pajaco/spaces ~/spaces',
+                 None),
+                (("popd ~/spaces && "
+                  "rc=$(git rev-parse --is-inside-work-tree) && "
+                  "popd; test $rc"),
+                 None,
+                 ('pushd ~/spaces && git init && '
+                  'git remote add origin git@github.com/pajaco/spaces && '
+                  'git checkout -t origin/master && popd')),
+                ("grep '*.swp' ~/spaces/.git/info/exclude",
+                 None,
+                 'cat >>~/spaces/.git/info/exclude <<EOF*.swp\nEOF')]
+    assert expected == result
