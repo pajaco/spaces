@@ -11,12 +11,11 @@ and will run the check (1) then depending on the result (2) or not.
 If appling state results in error then leaving state check (3) is called and
 depending on the checks result (4) may be called to clean up
 
-Each provider stores the state it found initially for the revert action.
-
 Providers shouldn't rely on doing own tests of state as their output once
 generated needs to be self-sufficient.
 """
 import os
+import platform
 
 
 class EnvProvider(object):
@@ -25,7 +24,6 @@ class EnvProvider(object):
         self.space = space
         self._env_vars = kwargs
         self.bac_preamble = "_SPACES_%s_" % self.space
-
 
     def provide(self):
         # check if variable set, back up if yes, export new one
@@ -40,13 +38,13 @@ class EnvProvider(object):
                                "{0}=${0} && {1}".format(k, positive)])
             out.append((test, positive, negative))
         return out
-        
+
     def revert(self):
         out = []
         for k in self._env_vars.keys():
             test = "env | grep %s%s" % (self.bac_preamble, k)
             positive = "export {0}=${1}{0}; unset {1}{0}".format(
-                    k, self.bac_preamble)
+                k, self.bac_preamble)
             negative = "unset {0}{1}".format(self.bac_preamble, k)
             out.append((test, positive, negative))
         return out
@@ -92,7 +90,8 @@ class PkgProvider(object):
         if len(candidates) < 1:
             raise RuntimeError("No concrete implementation available")
         if len(candidates) > 1:
-            raise RuntimeError("More than one concrete implementation available")
+            raise RuntimeError(
+                "More than one concrete implementation available")
         return candidates[0](**kwargs)
 
 
@@ -114,7 +113,8 @@ class DebPkgProvider(PkgProvider):
     def provide(self):
         if self.version:
             test = ('dpkg-query -W --showformat=\'${Status}*${Version}\' %s '
-                    '| grep "install ok installed*%s"') % (self.name, self.version)
+                    '| grep "install ok installed*%s"') % (
+                        self.name, self.version)
             install = 'sudo apt-get install %s==%s' % (self.name, self.version)
         else:
             test = ('dpkg-query -W --showformat=\'${Status}\' %s '
@@ -124,9 +124,25 @@ class DebPkgProvider(PkgProvider):
 
     @staticmethod
     def compatible_platform():
-        return platform.dist()[0] == 'Debian'
+        return platform.dist()[0].lower() == 'debian'
 
 PkgProvider.concrete_implementations.add(DebPkgProvider)
+
+
+class RpmPkgProvider(PkgProvider):
+    """Provides rpm packages' installations"""
+    def provide(self):
+        if self.version:
+            test = 'rpm -q {0} | grep {0}-{1}'.format(self.name, self.version)
+            install = 'yum install -y {0}-{1}'.format(self.name, self.version)
+        else:
+            test = 'rpm -q %s' % self.name
+            install = 'yum install -y %s' % self.name
+        return test, None, install
+
+    @staticmethod
+    def compatible_platform():
+        return platform.dist()[0].lower() == 'redhat'
 
 
 class GitProvider(object):
@@ -139,7 +155,6 @@ class GitProvider(object):
                 self.ignore.append(ignore[len(self.path):])
             else:
                 self.ignore.append(ignore)
-
 
     def provide(self):
         out = []
