@@ -16,6 +16,7 @@ generated needs to be self-sufficient.
 """
 import os
 import platform
+import ipdb
 
 
 class EnvProvider(object):
@@ -186,26 +187,87 @@ class GitProvider(object):
 class ProvideScriptBuilder(object):
     def __init__(self, *providers):
         self.providers = providers or []
-        self.show_tests = True
-        self.show_skipped = True
+        self.silent = False
 
     def _marshall_script_parts(self, data):
+        if data is None:
+            return [("true", "true", "false")]
         if isinstance(data, tuple):
-            return [data]
-        elif data is None:
-            return [(None, None, None)]
+            data = [data]
+        marshalled = []
+        for datum in data:
+            if len(datum) == 1:
+                datum = ["true", datum[0], "false"]
+            elif len(datum) == 2:
+                datum = [datum[0], datum[1], "false"]
+            else:
+                datum = list(datum)
+            if not isinstance(datum[0], str):
+                datum[0] = "true"
+            if not isinstance(datum[1], str):
+                datum[1] = "true"
+            if not isinstance(datum[2], str):
+                datum[1] = "false"
+            marshalled.append(datum)
+
         return data
 
+    template = """
+    echo {stepname}
+    {silencestart}
+    if PROCEED && ({test}) >/dev/null; then
+        ({primary})>/dev/null;
+    else
+        ({alternative})>/dev/null;
+    fi
+    if [ "$?" -ne "0" ]; then
+        echo Reverting...
+        if ({revtest}) >/dev/null; then
+            ({revprimary})>/dev/null;
+        else
+            ({revalter})>/dev/null;
+        fi
+        PROCEED=false
+    fi
+    {silenceend}
+    test $PROCEED && echo SUCCESS || echo FAILED
+    """
+
+
     def build(self):
-        out = []
+        out = ["PROCEED=true"]
+        if self.silent:
+            silence_start = "( # silencing"
+            silence_end = ") >/dev/null"
+        else:
+            silence_start = silence_end = ""
         for provider in self.providers:
+            try:
+                check_dep = provider.check_dependency()
+            except AttributeError:
+                pass
             provide = self._marshall_script_parts(provider.provide())
-            revert = self._marshall_script_parts(provider.revert())
+            try:
+                revert = self._marshall_script_parts(provider.revert())
+            except AttributeError:
+                revert = [("true", "true", "false")] * len(provide)
             # TODO lengths probably need to be the same
+            #
+            #ipdb.set_trace()
             for i in range(len(provide)):
-                prov_test, prov_ifpass, prov_iffail = provide[i]
-                rev_test, rev_ifpass, rev_iffail = revert[i]
-        return out
+                step_test, step_primary, step_alter = provide[i]
+                rev_test, rev_primary, rev_alter = revert[i]
+                _out = self.template.format(stepname="Step name",
+                                            test=step_test,
+                                            primary=step_primary,
+                                            alternative=step_alter,
+                                            revtest=rev_test,
+                                            revprimary=rev_primary,
+                                            revalter=rev_alter,
+                                            silencestart=silence_start,
+                                            silenceend=silence_end)
+                out.append(_out)
+        return "\n".join(out)
 
 if __name__ == "__main__":
     # TODO integration tests make more sense but for now...
@@ -259,3 +321,8 @@ if __name__ == "__main__":
                  None,
                  'cat >>~/spaces/.git/info/exclude <<EOF*.swp\nEOF')]
     assert expected == result
+
+    builder = ProvideScriptBuilder(env_provider, venv_provider, git_provider)
+    #builder.silent = True
+    print builder.build()
+                                   

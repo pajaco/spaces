@@ -1,10 +1,29 @@
 #!/bin/bash
 
-spaces(){
+space(){
     # commands list, enter, leave, describe
-    if [ "$1" = "list" ]; then
-        list-spaces
-    fi
+    case "$1" in
+        list)
+            list-spaces
+            ;;
+        enter)
+#            if ! "$2"; then
+#                echo "Choose the space to enter from"
+#                list-spaces
+#            else
+                enter-space $2
+#            fi
+            ;;
+        leave)
+            leave-space
+            ;;
+        describe)
+            describe-space
+            ;;
+        *)
+            echo "Choose one of list|enter|leave|describe"
+            ;;
+    esac
 }
 
 list-spaces(){
@@ -18,7 +37,15 @@ list-spaces(){
 list-spacedefs(){
     spaces=$(ls ~/.spaces/defs)
 }
-#_get_spacedef() {
-    #name=$1
-    #file=~/.spaces/$name
-#}
+
+enter-space(){
+    echo $1
+}
+
+leave-space(){
+    true
+}
+describe-space(){
+    true
+}
+
