@@ -39,7 +39,8 @@ list-spacedefs(){
 }
 
 enter-space(){
-    echo $1
+    PROCEED = true
+    REVERT = false
 }
 
 leave-space(){
@@ -49,3 +50,46 @@ describe-space(){
     true
 }
 
+# template functions
+# TODO move to separate script
+block-require-test(){
+    if $PROCEED; then
+        if ! eval $1; then
+            PROCEED=false
+        fi
+    fi
+}
+step-test() {
+    if $PROCEED || $REVERT; then
+        if eval $1; then
+            true
+        else
+            PROCEED=false
+        fi
+    fi
+}
+
+step-desc() {
+    echo $1
+}
+step-do(){
+    if $PROCEED || $REVERT; then
+        if eval $1; then
+            ""
+        else
+            PROCEED=false
+        fi
+    fi
+}
+step-revert(){
+    if ! $PROCEED; then
+        REVERT=true
+    fi
+}
+step-end(){
+    # cleanup, whatever
+    REVERT=false
+    if ! $PROCEED; then
+        true # stop here
+    fi
+}

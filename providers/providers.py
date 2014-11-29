@@ -20,11 +20,17 @@ import ipdb
 
 
 class EnvProvider(object):
-    """Provides setting and exporting environment variables"""
+    """Provide setting and exporting environment variables"""
     def __init__(self, space, **kwargs):
         self.space = space
+        self.description = None
         self._env_vars = kwargs
         self.bac_preamble = "_SPACES_%s_" % self.space
+
+    def get_description(self):
+        if self.description:
+            return self._description
+        return ":".join([self.__doc__, ", ".join(self._env_vars.keys())])
 
     def provide(self):
         # check if variable set, back up if yes, export new one
@@ -43,7 +49,7 @@ class EnvProvider(object):
     def revert(self):
         out = []
         for k in self._env_vars.keys():
-            test = "env | grep %s%s" % (self.bac_preamble, k)
+            test = "env | grep \"%s%s\"" % (self.bac_preamble, k)
             positive = "export {0}=${1}{0}; unset {1}{0}".format(
                 k, self.bac_preamble)
             negative = "unset {0}{1}".format(self.bac_preamble, k)
@@ -184,7 +190,7 @@ class GitProvider(object):
         return out
 
 
-class ProvideScriptBuilder(object):
+class ScriptGenerator(object):
     def __init__(self, *providers):
         self.providers = providers or []
         self.silent = False
@@ -212,61 +218,76 @@ class ProvideScriptBuilder(object):
 
         return data
 
-    template = """
-    echo {stepname}
-    {silencestart}
-    if PROCEED && ({test}) >/dev/null; then
-        ({primary})>/dev/null;
-    else
-        ({alternative})>/dev/null;
-    fi
-    if [ "$?" -ne "0" ]; then
-        echo Reverting...
-        if ({revtest}) >/dev/null; then
-            ({revprimary})>/dev/null;
-        else
-            ({revalter})>/dev/null;
-        fi
-        PROCEED=false
-    fi
-    {silenceend}
-    test $PROCEED && echo SUCCESS || echo FAILED
-    """
+    step_template = """if step-test "{steptest}"; then
+    step-desc "{stepprimarydesc}"
+    step "{stepprimary}"
+else
+    step-desc "{stepalterndesc}"
+    step-do "{stepaltern}"
+fi
 
+if step-revert; then
+    if step-test "{revtest}";
+    then
+        step-desc "{revprimarydesc}"
+        step "{revprimary}"
+    else
+        step-desc "{revalterndesc}"
+        step-do "{revaltern}"
+    fi
+fi
+step-end
+    """
+    def _write_step_template(self, **kwargs):
+        placeholders = {'steptest': 'true',
+                        'stepprimary': 'true',
+                        'stepprimarydesc': '',
+                        'stepalterndesc': '',
+                        'stepaltern': 'false',
+                        'revtest': 'true',
+                        'revprimarydesc': '',
+                        'revprimary': 'true',
+                        'revalterndesc': '',
+                        'revaltern': 'false'}
+        for k, v in kwargs.items():
+            if isinstance(v, str):
+                placeholders[k] = v.replace('"', '\\\"')
+        return self.step_template.format(**placeholders)
+
+    def _build_step(self, provide, revert):
+        out = []
+        for i in range(len(provide)):
+            step_test, step_primary, step_alter = provide[i]
+            rev_test, rev_primary, rev_alter = revert[i]
+            _out = self._write_step_template(steptest=step_test,
+                                             stepprimary=step_primary,
+                                             stepaltern=step_alter,
+                                             revtest=rev_test,
+                                             revprimary=rev_primary,
+                                             revaltern=rev_alter,)
+            out.append(_out)
+        return out
 
     def build(self):
-        out = ["PROCEED=true"]
-        if self.silent:
-            silence_start = "( # silencing"
-            silence_end = ") >/dev/null"
-        else:
-            silence_start = silence_end = ""
+        out = []
         for provider in self.providers:
+            out.append("#BLOCK")
             try:
-                check_dep = provider.check_dependency()
+                out.append("block-desc \"%s\"" % provider.get_description())
             except AttributeError:
-                pass
+                out.append("block-desc \"%s block\"" % type(provider).__name__)
             provide = self._marshall_script_parts(provider.provide())
             try:
                 revert = self._marshall_script_parts(provider.revert())
             except AttributeError:
                 revert = [("true", "true", "false")] * len(provide)
-            # TODO lengths probably need to be the same
-            #
-            #ipdb.set_trace()
-            for i in range(len(provide)):
-                step_test, step_primary, step_alter = provide[i]
-                rev_test, rev_primary, rev_alter = revert[i]
-                _out = self.template.format(stepname="Step name",
-                                            test=step_test,
-                                            primary=step_primary,
-                                            alternative=step_alter,
-                                            revtest=rev_test,
-                                            revprimary=rev_primary,
-                                            revalter=rev_alter,
-                                            silencestart=silence_start,
-                                            silenceend=silence_end)
-                out.append(_out)
+            try:
+                check_dep = provider.check_dependency()
+                out.append("block-require-test \"%s\"" % check_dep)
+            except AttributeError:
+                pass
+            out.extend(self._build_step(provide, revert))
+
         return "\n".join(out)
 
 if __name__ == "__main__":
@@ -287,7 +308,7 @@ if __name__ == "__main__":
                  ('export A=$_SPACES_testspace_A; '
                   'unset _SPACES_testspace_A'),
                  'unset _SPACES_testspace_A'), ]
-    assert expected == reverted
+    #assert expected == reverted
 
     venv_provider = VirtualenvProvider('testspace', path='~/env')
     assert 'which virtualenv' == venv_provider.check_dependency()
@@ -322,7 +343,7 @@ if __name__ == "__main__":
                  'cat >>~/spaces/.git/info/exclude <<EOF*.swp\nEOF')]
     assert expected == result
 
-    builder = ProvideScriptBuilder(env_provider, venv_provider, git_provider)
+    builder = ScriptGenerator(env_provider, venv_provider, git_provider)
     #builder.silent = True
     print builder.build()
                                    
