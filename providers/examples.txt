@@ -39,6 +39,7 @@
 [env test]
     _provider: EnvProvider
     WORKSPACE: ~/workspace/test
+    PYTHONPATH: $WORKSPACE/src
 
 #will result in list of provider instances:
 [project test] requires [repo test], [env test], [pythonpackage paramiko], [pythonpackage pytest], [virtualenv test]

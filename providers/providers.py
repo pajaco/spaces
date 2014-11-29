@@ -14,6 +14,7 @@ depending on the checks result (4) may be called to clean up
 Providers shouldn't rely on doing own tests of state as their output once
 generated needs to be self-sufficient.
 """
+
 import os
 import platform
 import ipdb
@@ -21,11 +22,12 @@ import ipdb
 
 class EnvProvider(object):
     """Provide setting and exporting environment variables"""
+    append_only = []
     def __init__(self, space, **kwargs):
         self.space = space
         self.description = None
         self._env_vars = kwargs
-        self.bac_preamble = "_SPACES_%s_" % self.space
+        self._bac_preamble = "_SPACES_%s_" % self.space
 
     def get_description(self):
         if self.description:
@@ -40,8 +42,12 @@ class EnvProvider(object):
         out = []
         for k, v in self._env_vars.items():
             test = "test -z \"$%s\"" % k
-            positive = "export {0}={1}".format(k, v)
-            negative = "".join([self.bac_preamble,
+            if k in self.append_only:
+                positive = "export {0}={1}:${0}".format(k, v)
+            else:
+                positive = "export {0}={1}".format(k, v)
+
+            negative = "".join([self._bac_preamble,
                                "{0}=${0} && {1}".format(k, positive)])
             out.append((test, positive, negative))
         return out
@@ -49,10 +55,10 @@ class EnvProvider(object):
     def revert(self):
         out = []
         for k in self._env_vars.keys():
-            test = "env | grep \"%s%s\"" % (self.bac_preamble, k)
+            test = "env | grep %s%s" % (self._bac_preamble, k)
             positive = "export {0}=${1}{0}; unset {1}{0}".format(
-                k, self.bac_preamble)
-            negative = "unset {0}{1}".format(self.bac_preamble, k)
+                k, self._bac_preamble)
+            negative = "unset {0}{1}".format(self._bac_preamble, k)
             out.append((test, positive, negative))
         return out
 
@@ -292,12 +298,13 @@ step-end
 
 if __name__ == "__main__":
     # TODO integration tests make more sense but for now...
+    EnvProvider.append_only = ['A']
     env_provider = EnvProvider('testspace', A='$TMP/blah', TMP='/tmp')
     provided = env_provider.provide()
     expected = [('test -z "$TMP"', 'export TMP=/tmp',
                  '_SPACES_testspace_TMP=$TMP && export TMP=/tmp'),
-                ('test -z "$A"', 'export A=$TMP/blah',
-                 '_SPACES_testspace_A=$A && export A=$TMP/blah')]
+                ('test -z "$A"', 'export A=$TMP/blah:$A',
+                 '_SPACES_testspace_A=$A && export A=$TMP/blah:$A')]
     assert expected == provided
     reverted = env_provider.revert()
     expected = [('env | grep _SPACES_testspace_TMP',
@@ -308,7 +315,11 @@ if __name__ == "__main__":
                  ('export A=$_SPACES_testspace_A; '
                   'unset _SPACES_testspace_A'),
                  'unset _SPACES_testspace_A'), ]
-    #assert expected == reverted
+
+    print expected
+    print ""
+    print reverted
+    assert expected == reverted
 
     venv_provider = VirtualenvProvider('testspace', path='~/env')
     assert 'which virtualenv' == venv_provider.check_dependency()
