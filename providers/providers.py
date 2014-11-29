@@ -89,23 +89,25 @@ class PkgProvider(object):
     def __init__(self, space, **kwargs):
         self.space = space
         self.name = kwargs['name']
-        self.version = kwargs['version']
+        self.version = kwargs.get('version', None)
 
     def revert(self):
         return None
 
     concrete_implementations = set()
 
-    @classmethod
-    def factory(cls, **kwargs):
-        candidates = [provider for provider in cls.concrete_implementations
-                      if provider.compatible_platform()]
-        if len(candidates) < 1:
-            raise RuntimeError("No concrete implementation available")
-        if len(candidates) > 1:
-            raise RuntimeError(
-                "More than one concrete implementation available")
-        return candidates[0](**kwargs)
+    def __new__(cls, space, **kwargs):
+        if cls is PkgProvider:
+            candidates = [provider for provider in cls.concrete_implementations
+                          if provider.compatible_platform()]
+            if len(candidates) < 1:
+                raise RuntimeError("No concrete implementation available")
+            if len(candidates) > 1:
+                raise RuntimeError(
+                    "More than one concrete implementation available")
+            return super(PkgProvider, cls).__new__(candidates[0], space, **kwargs)
+        else:
+            return super(PkgProvider, cls).__new__(cls, space, **kwargs)
 
 
 class PipProvider(PkgProvider):
@@ -131,8 +133,8 @@ class DebPkgProvider(PkgProvider):
             install = 'sudo apt-get install %s==%s' % (self.name, self.version)
         else:
             test = ('dpkg-query -W --showformat=\'${Status}\' %s '
-                    '| grep "install ok installed"') % (self.name, self.version)
-            install = 'sudo apt-get install %s' % (self.name, self.version)
+                    '| grep "install ok installed"') % (self.name)
+            install = 'sudo apt-get install %s' % (self.name)
         return test, None, install
 
     @staticmethod
@@ -316,9 +318,6 @@ if __name__ == "__main__":
                   'unset _SPACES_testspace_A'),
                  'unset _SPACES_testspace_A'), ]
 
-    print expected
-    print ""
-    print reverted
     assert expected == reverted
 
     venv_provider = VirtualenvProvider('testspace', path='~/env')
@@ -354,7 +353,16 @@ if __name__ == "__main__":
                  'cat >>~/spaces/.git/info/exclude <<EOF*.swp\nEOF')]
     assert expected == result
 
+    pkg_provider = PkgProvider('testspace', name='finger')
+    result = pkg_provider.provide()
+    # Debian
+    expected = (('dpkg-query -W --showformat=\'${Status}\' finger '
+                 '| grep "install ok installed"'),
+                None,
+                'sudo apt-get install finger')
+    #assert expected == result
+
     builder = ScriptGenerator(env_provider, venv_provider, git_provider)
-    #builder.silent = True
+    builder.silent = True
     print builder.build()
                                    
