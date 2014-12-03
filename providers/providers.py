@@ -23,10 +23,10 @@ import ipdb
 class EnvProvider(object):
     """Provide setting and exporting environment variables"""
     append_only = []
-    def __init__(self, space, **kwargs):
+    def __init__(self, space, params):
         self.space = space
         self.description = None
-        self._env_vars = kwargs
+        self._env_vars = params
         self._bac_preamble = "_SPACES_%s_" % self.space
 
     def get_description(self):
@@ -64,9 +64,9 @@ class EnvProvider(object):
 
 
 class VirtualenvProvider(object):
-    def __init__(self, space, **kwargs):
+    def __init__(self, space, params):
         self.space = space
-        self.path = kwargs['path']
+        self.path = params['path']
 
     def check_dependency(self):
         return "which virtualenv"
@@ -86,17 +86,22 @@ class VirtualenvProvider(object):
 
 class PkgProvider(object):
     """Base class for package handling"""
-    def __init__(self, space, **kwargs):
+    def __init__(self, space, params):
         self.space = space
-        self.name = kwargs['name']
-        self.version = kwargs.get('version', None)
+        self.packages = params
 
     def revert(self):
         return None
 
+    def provide(self):
+        out = []
+        for pkg, ver in self.packages.items():
+            out.append(self._provide(pkg, ver))
+        return out
+
     concrete_implementations = set()
 
-    def __new__(cls, space, **kwargs):
+    def __new__(cls, space, params):
         if cls is PkgProvider:
             candidates = [provider for provider in cls.concrete_implementations
                           if provider.compatible_platform()]
@@ -105,36 +110,36 @@ class PkgProvider(object):
             if len(candidates) > 1:
                 raise RuntimeError(
                     "More than one concrete implementation available")
-            return super(PkgProvider, cls).__new__(candidates[0], space, **kwargs)
+            return super(PkgProvider, cls).__new__(candidates[0], space, params)
         else:
-            return super(PkgProvider, cls).__new__(cls, space, **kwargs)
+            return super(PkgProvider, cls).__new__(cls, space, params)
 
 
 class PipProvider(PkgProvider):
     """Provides python packages' installations via pip"""
     # TODO handle upgrade/downgrade
-    def provide(self):
-        if self.version:
-            test = 'pip freeze | grep %s==%s' % (self.name, self.version)
-            install = 'pip install %s==%s' % (self.name, self.version)
+    def _provide(self, name, version):
+        if version:
+            test = 'pip freeze | grep %s==%s' % (name, version)
+            install = 'pip install %s==%s' % (name, version)
         else:
-            test = 'pip freeze | grep %s' % (self.name)
-            install = 'pip install %s' % (self.name)
+            test = 'pip freeze | grep %s' % (name)
+            install = 'pip install %s' % (name)
         return test, None, install
 
 
 class DebPkgProvider(PkgProvider):
     """Provides deb packages' installations"""
-    def provide(self):
-        if self.version:
+    def _provide(self, name, version):
+        if version:
             test = ('dpkg-query -W --showformat=\'${Status}*${Version}\' %s '
                     '| grep "install ok installed*%s"') % (
-                        self.name, self.version)
-            install = 'sudo apt-get install %s==%s' % (self.name, self.version)
+                        name, version)
+            install = 'sudo apt-get install %s==%s' % (name, version)
         else:
             test = ('dpkg-query -W --showformat=\'${Status}\' %s '
-                    '| grep "install ok installed"') % (self.name)
-            install = 'sudo apt-get install %s' % (self.name)
+                    '| grep "install ok installed"') % (name)
+            install = 'sudo apt-get install %s' % (name)
         return test, None, install
 
     @staticmethod
@@ -146,13 +151,13 @@ PkgProvider.concrete_implementations.add(DebPkgProvider)
 
 class RpmPkgProvider(PkgProvider):
     """Provides rpm packages' installations"""
-    def provide(self):
-        if self.version:
-            test = 'rpm -q {0} | grep {0}-{1}'.format(self.name, self.version)
-            install = 'yum install -y {0}-{1}'.format(self.name, self.version)
+    def _provide(self, name, version):
+        if version:
+            test = 'rpm -q {0} | grep {0}-{1}'.format(name, version)
+            install = 'yum install -y {0}-{1}'.format(name, version)
         else:
-            test = 'rpm -q %s' % self.name
-            install = 'yum install -y %s' % self.name
+            test = 'rpm -q %s' % name
+            install = 'yum install -y %s' % name
         return test, None, install
 
     @staticmethod
@@ -161,11 +166,11 @@ class RpmPkgProvider(PkgProvider):
 
 
 class GitProvider(object):
-    def __init__(self, space, **kwargs):
-        self.path = kwargs['path']
-        self.origin = kwargs['origin']
+    def __init__(self, space, params):
+        self.path = params['path']
+        self.origin = params['origin']
         self.ignore = []  # private ignore, goes to .git/info/exclude
-        for ignore in kwargs.get('ignore', []):
+        for ignore in params.get('ignore', []):
             if ignore.startswith(self.path):
                 self.ignore.append(ignore[len(self.path):])
             else:
@@ -301,7 +306,7 @@ step-end
 if __name__ == "__main__":
     # TODO integration tests make more sense but for now...
     EnvProvider.append_only = ['A']
-    env_provider = EnvProvider('testspace', A='$TMP/blah', TMP='/tmp')
+    env_provider = EnvProvider('testspace', params=dict(A='$TMP/blah', TMP='/tmp'))
     provided = env_provider.provide()
     expected = [('test -z "$TMP"', 'export TMP=/tmp',
                  '_SPACES_testspace_TMP=$TMP && export TMP=/tmp'),
@@ -320,7 +325,7 @@ if __name__ == "__main__":
 
     assert expected == reverted
 
-    venv_provider = VirtualenvProvider('testspace', path='~/env')
+    venv_provider = VirtualenvProvider('testspace', params=dict(path='~/env'))
     assert 'which virtualenv' == venv_provider.check_dependency()
     provided = venv_provider.provide()
     expected = ('test -d ~/env -a -f ~/env/bin/activate',
@@ -335,9 +340,9 @@ if __name__ == "__main__":
     assert expected == reverted
 
     git_provider = GitProvider('testspace',
-                               origin='git@github.com/pajaco/spaces',
-                               path='~/spaces',
-                               ignore=['*.swp'])
+                               params=dict(origin='git@github.com/pajaco/spaces',
+                                           path='~/spaces',
+                                           ignore=['*.swp']))
     result = git_provider.provide()
     expected = [('test ! -d ~/spaces',
                  'git clone git@github.com/pajaco/spaces ~/spaces', None),
@@ -353,16 +358,19 @@ if __name__ == "__main__":
                  'cat >>~/spaces/.git/info/exclude <<EOF*.swp\nEOF')]
     assert expected == result
 
-    pkg_provider = PkgProvider('testspace', name='finger')
+    pkg_provider = PkgProvider('testspace', params=dict(finger=None))
     result = pkg_provider.provide()
     # Debian
-    expected = (('dpkg-query -W --showformat=\'${Status}\' finger '
-                 '| grep "install ok installed"'),
-                None,
-                'sudo apt-get install finger')
-    #assert expected == result
+    expected = [(('dpkg-query -W --showformat=\'${Status}\' finger '
+                  '| grep "install ok installed"'),
+                 None,
+                 'sudo apt-get install finger')]
+    assert expected == result
 
-    builder = ScriptGenerator(env_provider, venv_provider, git_provider)
+    pip_provider = PipProvider('testspace', params={'ipython': '1.2.0'})
+    result = pip_provider.provide()
+
+    builder = ScriptGenerator(env_provider, venv_provider, git_provider, pkg_provider)
     builder.silent = True
     print builder.build()
                                    
