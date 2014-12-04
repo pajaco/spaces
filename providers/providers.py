@@ -95,8 +95,8 @@ class PkgProvider(object):
 
     def provide(self):
         out = []
-        for pkg, ver in self.packages.items():
-            out.append(self._provide(pkg, ver))
+        for pkg in sorted(self.packages.keys()):
+            out.append(self._provide(pkg, self.packages[pkg]))
         return out
 
     concrete_implementations = set()
@@ -233,7 +233,7 @@ class ScriptGenerator(object):
 
     step_template = """if step-test "{steptest}"; then
     step-desc "{stepprimarydesc}"
-    step "{stepprimary}"
+    step-do "{stepprimary}"
 else
     step-desc "{stepalterndesc}"
     step-do "{stepaltern}"
@@ -243,7 +243,7 @@ if step-revert; then
     if step-test "{revtest}";
     then
         step-desc "{revprimarydesc}"
-        step "{revprimary}"
+        step-do "{revprimary}"
     else
         step-desc "{revalterndesc}"
         step-do "{revaltern}"
@@ -271,7 +271,10 @@ step-end
         out = []
         for i in range(len(provide)):
             step_test, step_primary, step_alter = provide[i]
-            rev_test, rev_primary, rev_alter = revert[i]
+            try:
+                rev_test, rev_primary, rev_alter = revert[i]
+            except IndexError:
+                rev_test, rev_primary, rev_alter = 'true', 'true', 'false'
             _out = self._write_step_template(steptest=step_test,
                                              stepprimary=step_primary,
                                              stepaltern=step_alter,
@@ -358,13 +361,18 @@ if __name__ == "__main__":
                  'cat >>~/spaces/.git/info/exclude <<EOF*.swp\nEOF')]
     assert expected == result
 
-    pkg_provider = PkgProvider('testspace', params=dict(finger=None))
+    pkg_provider = PkgProvider('testspace', params=dict(finger=None, wget='1.13.4'))
     result = pkg_provider.provide()
     # Debian
     expected = [(('dpkg-query -W --showformat=\'${Status}\' finger '
                   '| grep "install ok installed"'),
                  None,
-                 'sudo apt-get install finger')]
+                 'sudo apt-get install finger'),
+                 (('dpkg-query -W --showformat=\'${Status}*${Version}\' wget '
+                   '| grep "install ok installed*1.13.4"'),
+                  None,
+                  'sudo apt-get install wget==1.13.4')]
+    #print result
     assert expected == result
 
     pip_provider = PipProvider('testspace', params={'ipython': '1.2.0'})
