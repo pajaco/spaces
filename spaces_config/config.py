@@ -14,6 +14,7 @@ from ConfigParser import (ConfigParser, NoOptionError, Error,
                           NoSectionError, MAX_INTERPOLATION_DEPTH)
 from StringIO import StringIO
 import re
+import ipdb
 
 
 class SpacesConfigParser(ConfigParser):
@@ -25,10 +26,9 @@ class SpacesConfigParser(ConfigParser):
         return list(filter(None, (x.strip() for x in value.splitlines())))
 
     def getuses(self, section):
+        out = []
         try:
-            usestuple = self.gettuple(section, self._USES_OPT)
-            out = []
-            for uses in usestuple:
+            for uses in self.gettuple(section, self._USES_OPT):
                 if uses[0] == '[':
                     uses = uses[1:]
                 if uses[-1] == ']':
@@ -36,9 +36,18 @@ class SpacesConfigParser(ConfigParser):
                 if not self.has_section(uses):
                     raise NoSectionError(uses)
                 out.append(uses)
-            return tuple(out)
         except NoOptionError:
-            return tuple()
+            pass
+
+        # now those used for interpolation
+        for o, v in self.items(section, raw=True):
+            m = self._KEYCRE.match(v)
+            if m.group(1):
+                if not self.has_section(m.group(1)):
+                    raise NoSectionError(m.group(1))
+                out.append(m.group(1))
+
+        return set(out)
         pass
 
     def getprovider(self, section):
@@ -97,14 +106,13 @@ def get_dependency_graph(config):
 if __name__ == "__main__":
     cfg = """
 [test section 1]
-a b : c
 testkeya:   1
 testkeyb:   a
             b
 _provider: BlahProvider
 
 [test section 2]
-_uses: [test section 1]
+#_uses: [test section 1]
 testkeya: [test section 1]:testkeyafoo
 testkeyb: [test section 1]:testkeyb
 _provider: FooProvider
@@ -112,14 +120,15 @@ _provider: FooProvider
 
     config = SpacesConfigParser(allow_no_value=True)
     config.readfp(StringIO(cfg), 'cfg')
-    print config.sections()
-    print config.items('test section 1')
-    print config.items('test section 2')
-    print config.gettuple('test section 2', 'testkeya')
-    print config.gettuple('test section 2', 'testkeyb')
-    print config.gettuple('test section 1', 'testkeyb')
-    print config.gettuple('test section 1', 'testkeya')
+    #print config.sections()
+    #print config.items('test section 1')
+    #print config.items('test section 2')
+    #print config.gettuple('test section 2', 'testkeya')
+    #print config.gettuple('test section 2', 'testkeyb')
+    #print config.gettuple('test section 1', 'testkeyb')
+    #print config.gettuple('test section 1', 'testkeya')
     print config.getuses('test section 1')
-    print config.getprovider('test section 1')
-    print config.getprovider('test section 2')
-    print get_dependency_graph(config)
+    print config.getuses('test section 2')
+    #print config.getprovider('test section 1')
+    #print config.getprovider('test section 2')
+    #print get_dependency_graph(config)
