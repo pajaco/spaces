@@ -17,6 +17,7 @@ generated needs to be self-sufficient.
 
 import os
 import platform
+import ipdb
 
 
 class StopTheLine(Exception):
@@ -198,14 +199,33 @@ PkgProvider.concrete_implementations.add(DebPkgProvider)
 
 class RpmPkgProvider(PkgProvider):
     """Provides rpm packages' installations"""
-    def _provide(self, name, version):
-        if version:
-            test = 'rpm -q {0} | grep {0}-{1}'.format(name, version)
-            install = 'yum install -y {0}-{1}'.format(name, version)
-        else:
-            test = 'rpm -q %s' % name
-            install = 'yum install -y %s' % name
-        return test, None, install
+
+    def provide(self):
+        """Install and upgrade rpm packages"""
+        rcode, rpm, _ = yield "which rpm"
+        if rcode != 0:
+            raise StopTheLine("rpm not available")
+        rcode, yum, _ = yield "which yum"
+        if rcode != 0:
+            raise StopTheLine("yum not available")
+        _, stdout, _ = yield "%s -qa" % rpm
+        installed = {}
+        for line in stdout.strip().split("\n"):
+            name, version = line.split("-")
+            installed[name] = version
+        to_install, to_upgrade = self._get_upgrades_and_installs(
+                installed, '-')
+        rcode, _, _ = yield "sudo %s makecache" % yum
+        if rcode != 0:
+            raise StopTheLine("Failed to update yum cache")
+        if to_upgrade:
+            rcode, _, _ = yield " ".join(
+                ["sudo %s upgrade -y" % yum] + to_upgrade)
+        if rcode != 0:
+            raise StopTheLine("RPM packages' installation failed")
+        if to_install:
+            rcode, _, _ = yield " ".join(
+                    ["sudo %s install -y" % yum] + to_install)
 
     @staticmethod
     def compatible_platform():
@@ -281,8 +301,8 @@ if __name__ == "__main__":
     cmd = result.send((0, "", ""))
     assert "/usr/bin/pip install nosuchone" == cmd
 
-    pkg_provider = PkgProvider(params=dict(finger=None, wget='1.13.4'))
-    result = pkg_provider.provide()
+    deb_provider = DebPkgProvider(params=dict(finger=None, wget='1.13.4'))
+    result = deb_provider.provide()
     assert "which apt-get" == result.next()
     assert "which dpkg-query" == result.send((0, '/usr/bin/apt-get', ''))
     out = "/usr/bin/dpkg-query -W --showformat='${Package}==${Version}\n'"
@@ -293,6 +313,19 @@ if __name__ == "__main__":
     assert "sudo /usr/bin/apt-get upgrade wget=1.13.4" == cmd
     cmd = result.send((0, "", ""))
     assert "sudo /usr/bin/apt-get install finger" == cmd
+
+    rpm_provider = RpmPkgProvider(params=dict(finger=None, wget='1.13.4'))
+    result = rpm_provider.provide()
+    assert "which rpm" == result.next()
+    assert "which yum" == result.send((0, '/usr/bin/rpm', ''))
+    cmd = result.send((0, '/usr/bin/yum', ''))
+    assert "/usr/bin/rpm -qa" == cmd
+    assert "sudo /usr/bin/yum makecache" == result.send(
+            (0, "foo-1.1.1\nwget-1.0.1", ""))
+    cmd = result.send((0, "", ""))
+    assert "sudo /usr/bin/yum upgrade -y wget-1.13.4" == cmd
+    cmd = result.send((0, "", ""))
+    assert "sudo /usr/bin/yum install -y finger" == cmd
 
     git_provider = GitProvider(
         params=dict(origin='git@github.com/pajaco/spaces',
