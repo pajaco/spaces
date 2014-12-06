@@ -2,10 +2,10 @@
 Regular ini rules, except:
     special settings:
         _use: those will be marked as dependencies of the current section
-        _provider: the python provider that creates shell scripts
+        _provider: the python provider that creates shell commands
 
     keys can have no value
-    values can be lists (space is separator)
+    values can be lists (whitespace is separator)
     values can contain references to other sections and particular keys in them
 """
 
