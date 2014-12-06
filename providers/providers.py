@@ -17,91 +17,108 @@ generated needs to be self-sufficient.
 
 import os
 import platform
-import ipdb
+
+
+class StopTheLine(Exception):
+    """Named in honour of Nick Forbes, the best manager ever"""
+    pass
 
 
 class EnvProvider(object):
     """Provide setting and exporting environment variables"""
-    append_only = []
-    def __init__(self, space, params):
-        self.space = space
-        self.description = None
-        self._env_vars = params
-        self._bac_preamble = "_SPACES_%s_" % self.space
 
-    def get_description(self):
-        if self.description:
-            return self._description
-        return ":".join([self.__doc__, ", ".join(self._env_vars.keys())])
+    append_only = []
+
+    def __init__(self, params):
+        self._env_vars = params.copy()
+        self._backup = {}
+
+    def _save_current_vars(self, stdout):
+        lines = stdout.split("\n")
+        for line in lines:
+            name, value = line.split("=", 1)
+            if name in self._env_vars:
+                self._backup[name] = value
+
+    def _get_export_commands(self):
+        names = self._env_vars.keys()
+        # ensure variables having other baked in go to the end of queue
+        names.sort(cmp=lambda x, y: -1 if x in self._env_vars[y] else 0)
+        return ["export %s=%s" % (name, self._env_vars[name])
+                for name in names]
 
     def provide(self):
-        # check if variable set, back up if yes, export new one
-        keys = self._env_vars.keys()
-        # ensure variables having other baked in go to the end of queue
-        keys.sort(cmp=lambda x, y: -1 if x in self._env_vars[y] else 0)
-        out = []
-        for k, v in self._env_vars.items():
-            test = "test -z \"$%s\"" % k
-            if k in self.append_only:
-                positive = "export {0}={1}:${0}".format(k, v)
-            else:
-                positive = "export {0}={1}".format(k, v)
-
-            negative = "".join([self._bac_preamble,
-                               "{0}=${0} && {1}".format(k, positive)])
-            out.append((test, positive, negative))
-        return out
+        """Set environment variables (back up existing)"""
+        _, stdout, _ = yield "env"
+        self._save_current_vars(stdout)
+        for cmd in self._get_export_commands():
+            yield cmd
 
     def revert(self):
-        out = []
-        for k in self._env_vars.keys():
-            test = "env | grep %s%s" % (self._bac_preamble, k)
-            positive = "export {0}=${1}{0}; unset {1}{0}".format(
-                k, self._bac_preamble)
-            negative = "unset {0}{1}".format(self._bac_preamble, k)
-            out.append((test, positive, negative))
-        return out
+        """Restore environment variables"""
+        for var, val in self._backup.iteritems():
+            yield "export %s=%s" % (var, val)
+        if self._backup:
+            backup_keys = self._backup.keys()
+            yield "unset %s" % " ".join([var for var in self._env_vars.keys()
+                                         if var not in backup_keys])
+        else:
+            yield "unset %s" % " ".join(self._env_vars.keys())
 
 
 class VirtualenvProvider(object):
-    def __init__(self, space, params):
-        self.space = space
+    """Provide virtualenv"""
+    def __init__(self, params):
         self.path = params['path']
 
-    def check_dependency(self):
-        return "which virtualenv"
-
     def provide(self):
-        test = 'test -d %s -a -f %s/bin/activate' % (self.path, self.path)
-        positive = 'source %s/bin/activate' % self.path
-        negative = ' && '.join(['virtualenv %s' % self.path,
-                                positive])
-        return test, positive, negative
+        """Set up and activate virtualenv"""
+        rcode, stdout, _ = yield "which virtualenv"
+        if rcode != 0:
+            raise StopTheLine("Virtualenv is not installed")
+        virtualenv = stdout
+        activate_path = '%s/bin/activate' % self.path
+        rcode, _, _ = yield "test -f %s" % activate_path
+        if rcode != 0:
+            rcode, _, _ = yield "%s %s" % (virtualenv, self.path)
+            if rcode != 0:
+                raise StopTheLine("Virtualenv setup failed")
+        # we have env set up
+        rcode, _, _ = yield 'test -z "$VIRTUAL_ENV"'
+        if rcode != 0:
+            yield "source %s" % activate_path
 
     def revert(self):
-        test = 'env | grep VIRTUAL_ENV=%s' % self.path
-        positive = 'deactivate'
-        return test, positive, None
+        """Deactivate virtualenv"""
+        rcode, stdout, _ = yield "type -t deactivate"
+        if rcode == 0 and stdout.strip() == 'function':
+            yield 'deactivate'  # bash function
 
 
 class PkgProvider(object):
     """Base class for package handling"""
-    def __init__(self, space, params):
-        self.space = space
-        self.packages = params
+    def __init__(self, params):
+        self._packages = params
+        self._backup = {}
 
-    def revert(self):
-        return None
-
-    def provide(self):
-        out = []
-        for pkg in sorted(self.packages.keys()):
-            out.append(self._provide(pkg, self.packages[pkg]))
-        return out
+    def _get_upgrades_and_installs(self, installed, ver_mark):
+        to_install = []
+        to_upgrade = []
+        for package, version in self._packages.iteritems():
+            if package in installed:
+                if not version:
+                    to_upgrade.append(package)
+                elif installed[package] != version:
+                    to_upgrade.append("%s%s%s" % (package, ver_mark, version))
+            elif not version:
+                to_install.append(package)
+            else:
+                to_install.append("%s%s%s" % (package, ver_mark, version))
+        return to_install, to_upgrade
 
     concrete_implementations = set()
 
-    def __new__(cls, space, params):
+    def __new__(cls, params):
         if cls is PkgProvider:
             candidates = [provider for provider in cls.concrete_implementations
                           if provider.compatible_platform()]
@@ -110,37 +127,67 @@ class PkgProvider(object):
             if len(candidates) > 1:
                 raise RuntimeError(
                     "More than one concrete implementation available")
-            return super(PkgProvider, cls).__new__(candidates[0], space, params)
+            return super(PkgProvider, cls).__new__(
+                    candidates[0], params)
         else:
-            return super(PkgProvider, cls).__new__(cls, space, params)
+            return super(PkgProvider, cls).__new__(cls, params)
 
 
 class PipProvider(PkgProvider):
-    """Provides python packages' installations via pip"""
-    # TODO handle upgrade/downgrade
-    def _provide(self, name, version):
-        if version:
-            test = 'pip freeze | grep %s==%s' % (name, version)
-            install = 'pip install %s==%s' % (name, version)
+    """Provides python packages installed with pip"""
+    def provide(self):
+        rcode, stdout, _ = yield "which pip"
+        if rcode != 0:
+            raise StopTheLine("Pip is not installed")
+        pip = stdout
+        installed = {}
+        _, stdout, _ = yield "%s freeze" % pip
+        for line in stdout.split("\n"):
+            name, version = line.split("==")
+            installed[name] = version
+
+        to_install, to_upgrade = self._get_upgrades_and_installs(
+                installed, '==')
+        rcode, _, _ = yield " ".join(["%s install -U" % pip] + to_upgrade)
+        if rcode == 0:
+            rcode, _, _ = yield " ".join(
+                    ["%s install" % pip] + to_install)
+            if rcode != 0:
+                raise StopTheLine("Installing packages failed")
         else:
-            test = 'pip freeze | grep %s' % (name)
-            install = 'pip install %s' % (name)
-        return test, None, install
+            raise StopTheLine("Upgrading packages failed")
 
 
 class DebPkgProvider(PkgProvider):
     """Provides deb packages' installations"""
-    def _provide(self, name, version):
-        if version:
-            test = ('dpkg-query -W --showformat=\'${Status}*${Version}\' %s '
-                    '| grep "install ok installed*%s"') % (
-                        name, version)
-            install = 'sudo apt-get install %s==%s' % (name, version)
-        else:
-            test = ('dpkg-query -W --showformat=\'${Status}\' %s '
-                    '| grep "install ok installed"') % (name)
-            install = 'sudo apt-get install %s' % (name)
-        return test, None, install
+    def provide(self):
+        rcode, apt, _ = yield "which apt-get"
+        if rcode != 0:
+            raise StopTheLine("apt-get not available")
+        rcode, dpkg_query, _ = yield "which dpkg-query"
+        if rcode != 0:
+            raise StopTheLine("dpkg-query not available")
+        cmd = "%s -W --showformat='${Package}==${Version}\n'" % dpkg_query
+        _, stdout, _ = yield cmd
+
+        installed = {}
+        for line in stdout.strip().split("\n"):
+            name, version = line.split("==")
+            installed[name] = version
+        to_install, to_upgrade = self._get_upgrades_and_installs(
+                installed, '=')
+
+        rcode, _, _ = yield "sudo %s update" % apt
+        if rcode != 0:
+            raise StopTheLine("Failed to update apt-get cache")
+        if to_upgrade:
+            rcode, _, _ = yield " ".join(
+                ["sudo %s upgrade" % apt] + to_upgrade)
+        if rcode != 0:
+            raise StopTheLine("Debian packages installation failed")
+        if to_install:
+            rcode, _, _ = yield " ".join(
+                    ["sudo %s install" % apt] + to_install)
 
     @staticmethod
     def compatible_platform():
@@ -166,7 +213,7 @@ class RpmPkgProvider(PkgProvider):
 
 
 class GitProvider(object):
-    def __init__(self, space, params):
+    def __init__(self, params):
         self.path = params['path']
         self.origin = params['origin']
         self.ignore = []  # private ignore, goes to .git/info/exclude
@@ -177,208 +224,83 @@ class GitProvider(object):
                 self.ignore.append(ignore)
 
     def provide(self):
-        out = []
-        # no repo, no dir
-        test = "test ! -d {0}".format(self.path)
-        positive = "git clone {0} {1}".format(self.origin, self.path)
-        out.append((test, positive, None))
-        # dir but no repo
-        # TODO should it be created at this point???
-        test = ("popd {0} && rc=$(git rev-parse --is-inside-work-tree) "
-                "&& popd; test $rc").format(self.path)
+        rcode, git, _ = yield "which git"
+        if rcode != 0:
+            raise StopTheLine("Git is not installed")
 
-        negative = ["pushd {0}",
-                    "git init",
-                    "git remote add origin {1}",
-                    "git checkout -t origin/master",
-                    "popd"]
-        negative = " && ".join(negative).format(self.path, self.origin)
-        out.append((test, None, negative))
+        rcode, _, _ = yield "test -d %s" % self.path
+        if rcode == 0:
+            raise StopTheLine("Directory already exists")
+        rcode, _, _ = yield "%s clone %s %s" % (git, self.origin, self.path)
+        if rcode != 0:
+            raise StopTheLine("Cannot clone repo")
         # ignore
         exclude_path = os.path.join(self.path, ".git/info/exclude")
-        for ignore in self.ignore:
-            test = "grep '%s' %s" % (ignore, exclude_path)
-            negative = "cat >>{0} <<EOF{1}\nEOF".format(exclude_path, ignore)
-            out.append((test, None, negative))
-        return out
+        ignore = "\n".join(self.ignore)
+        _, _, _ = yield "cat >>%s <<EOF%s\nEOF" % (exclude_path, ignore)
 
-
-class ScriptGenerator(object):
-    def __init__(self, *providers):
-        self.providers = providers or []
-        self.silent = False
-
-    def _marshall_script_parts(self, data):
-        if data is None:
-            return [("true", "true", "false")]
-        if isinstance(data, tuple):
-            data = [data]
-        marshalled = []
-        for datum in data:
-            if len(datum) == 1:
-                datum = ["true", datum[0], "false"]
-            elif len(datum) == 2:
-                datum = [datum[0], datum[1], "false"]
-            else:
-                datum = list(datum)
-            if not isinstance(datum[0], str):
-                datum[0] = "true"
-            if not isinstance(datum[1], str):
-                datum[1] = "true"
-            if not isinstance(datum[2], str):
-                datum[1] = "false"
-            marshalled.append(datum)
-
-        return data
-
-    step_template = """if step-test "{steptest}"; then
-    step-desc "{stepprimarydesc}"
-    step-do "{stepprimary}"
-else
-    step-desc "{stepalterndesc}"
-    step-do "{stepaltern}"
-fi
-
-if step-revert; then
-    if step-test "{revtest}";
-    then
-        step-desc "{revprimarydesc}"
-        step-do "{revprimary}"
-    else
-        step-desc "{revalterndesc}"
-        step-do "{revaltern}"
-    fi
-fi
-step-end
-    """
-    def _write_step_template(self, **kwargs):
-        placeholders = {'steptest': 'true',
-                        'stepprimary': 'true',
-                        'stepprimarydesc': '',
-                        'stepalterndesc': '',
-                        'stepaltern': 'false',
-                        'revtest': 'true',
-                        'revprimarydesc': '',
-                        'revprimary': 'true',
-                        'revalterndesc': '',
-                        'revaltern': 'false'}
-        for k, v in kwargs.items():
-            if isinstance(v, str):
-                placeholders[k] = v.replace('"', '\\\"')
-        return self.step_template.format(**placeholders)
-
-    def _build_step(self, provide, revert):
-        out = []
-        for i in range(len(provide)):
-            step_test, step_primary, step_alter = provide[i]
-            try:
-                rev_test, rev_primary, rev_alter = revert[i]
-            except IndexError:
-                rev_test, rev_primary, rev_alter = 'true', 'true', 'false'
-            _out = self._write_step_template(steptest=step_test,
-                                             stepprimary=step_primary,
-                                             stepaltern=step_alter,
-                                             revtest=rev_test,
-                                             revprimary=rev_primary,
-                                             revaltern=rev_alter,)
-            out.append(_out)
-        return out
-
-    def build(self):
-        out = []
-        for provider in self.providers:
-            out.append("#BLOCK")
-            try:
-                out.append("block-desc \"%s\"" % provider.get_description())
-            except AttributeError:
-                out.append("block-desc \"%s block\"" % type(provider).__name__)
-            provide = self._marshall_script_parts(provider.provide())
-            try:
-                revert = self._marshall_script_parts(provider.revert())
-            except AttributeError:
-                revert = [("true", "true", "false")] * len(provide)
-            try:
-                check_dep = provider.check_dependency()
-                out.append("block-require-test \"%s\"" % check_dep)
-            except AttributeError:
-                pass
-            out.extend(self._build_step(provide, revert))
-
-        return "\n".join(out)
 
 if __name__ == "__main__":
-    # TODO integration tests make more sense but for now...
-    EnvProvider.append_only = ['A']
-    env_provider = EnvProvider('testspace', params=dict(A='$TMP/blah', TMP='/tmp'))
-    provided = env_provider.provide()
-    expected = [('test -z "$TMP"', 'export TMP=/tmp',
-                 '_SPACES_testspace_TMP=$TMP && export TMP=/tmp'),
-                ('test -z "$A"', 'export A=$TMP/blah:$A',
-                 '_SPACES_testspace_A=$A && export A=$TMP/blah:$A')]
-    assert expected == provided
-    reverted = env_provider.revert()
-    expected = [('env | grep _SPACES_testspace_TMP',
-                 ('export TMP=$_SPACES_testspace_TMP; '
-                  'unset _SPACES_testspace_TMP'),
-                 'unset _SPACES_testspace_TMP'),
-                ('env | grep _SPACES_testspace_A',
-                 ('export A=$_SPACES_testspace_A; '
-                  'unset _SPACES_testspace_A'),
-                 'unset _SPACES_testspace_A'), ]
+    env_provider = EnvProvider(params=dict(A='$TMP/blah', TMP='/tmp'))
+    result = env_provider.provide()
+    assert "env" == result.next()
+    stdout = "SHELL=/bin/bash\nUSER=jks\nTMP=/another"
+    assert "export TMP=/tmp" == result.send((0, stdout, ""))
+    assert "export A=$TMP/blah" == result.send((0, "", ""))
+    try:
+        result.send((0, "", ""))
+    except StopIteration as e:
+        assert True
+    result = env_provider.revert()
+    assert "export TMP=/another" == result.next()
+    assert "unset A" == result.next()
 
-    assert expected == reverted
+    venv_provider = VirtualenvProvider(params=dict(path='~/env'))
+    result = venv_provider.provide()
+    assert "which virtualenv" == result.next()
+    assert "test -f ~/env/bin/activate" == result.send(
+            (0, "/usr/local/bin/virtualenv", ""))
+    assert "/usr/local/bin/virtualenv ~/env" == result.send((1, "", ""))
+    assert "test -z \"$VIRTUAL_ENV\"" == result.send((0, "", ""))
+    assert "source ~/env/bin/activate" == result.send((1, "", ""))
+    try:
+        result.send((0, "", ""))
+    except StopIteration as e:
+        pass
+    result = venv_provider.revert()
+    assert "type -t deactivate" == result.next()
+    assert "deactivate" == result.send((0, "function\n", ""))
 
-    venv_provider = VirtualenvProvider('testspace', params=dict(path='~/env'))
-    assert 'which virtualenv' == venv_provider.check_dependency()
-    provided = venv_provider.provide()
-    expected = ('test -d ~/env -a -f ~/env/bin/activate',
-                'source ~/env/bin/activate',
-                ('virtualenv ~/env && '
-                 'source ~/env/bin/activate'))
-    assert expected == provided
-    reverted = venv_provider.revert()
-    expected = ('env | grep VIRTUAL_ENV=~/env',
-                'deactivate',
-                None)
-    assert expected == reverted
-
-    git_provider = GitProvider('testspace',
-                               params=dict(origin='git@github.com/pajaco/spaces',
-                                           path='~/spaces',
-                                           ignore=['*.swp']))
-    result = git_provider.provide()
-    expected = [('test ! -d ~/spaces',
-                 'git clone git@github.com/pajaco/spaces ~/spaces', None),
-                (("popd ~/spaces && "
-                  "rc=$(git rev-parse --is-inside-work-tree) && "
-                  "popd; test $rc"),
-                 None,
-                 ('pushd ~/spaces && git init && '
-                  'git remote add origin git@github.com/pajaco/spaces && '
-                  'git checkout -t origin/master && popd')),
-                ("grep '*.swp' ~/spaces/.git/info/exclude",
-                 None,
-                 'cat >>~/spaces/.git/info/exclude <<EOF*.swp\nEOF')]
-    assert expected == result
-
-    pkg_provider = PkgProvider('testspace', params=dict(finger=None, wget='1.13.4'))
-    result = pkg_provider.provide()
-    # Debian
-    expected = [(('dpkg-query -W --showformat=\'${Status}\' finger '
-                  '| grep "install ok installed"'),
-                 None,
-                 'sudo apt-get install finger'),
-                 (('dpkg-query -W --showformat=\'${Status}*${Version}\' wget '
-                   '| grep "install ok installed*1.13.4"'),
-                  None,
-                  'sudo apt-get install wget==1.13.4')]
-    #print result
-    assert expected == result
-
-    pip_provider = PipProvider('testspace', params={'ipython': '1.2.0'})
+    pip_provider = PipProvider(params={'ipython': '1.2.0',
+                                       'nosuchone': None})
     result = pip_provider.provide()
+    assert "which pip" == result.next()
+    assert "/usr/bin/pip freeze" == result.send((0, "/usr/bin/pip", ""))
+    cmd = result.send((0, "ipython==1.1.0", ""))
+    assert "/usr/bin/pip install -U ipython==1.2.0" == cmd
+    cmd = result.send((0, "", ""))
+    assert "/usr/bin/pip install nosuchone" == cmd
 
-    builder = ScriptGenerator(env_provider, venv_provider, git_provider, pkg_provider)
-    builder.silent = True
-    print builder.build()
-                                   
+    pkg_provider = PkgProvider(params=dict(finger=None, wget='1.13.4'))
+    result = pkg_provider.provide()
+    assert "which apt-get" == result.next()
+    assert "which dpkg-query" == result.send((0, '/usr/bin/apt-get', ''))
+    out = "/usr/bin/dpkg-query -W --showformat='${Package}==${Version}\n'"
+    assert out == result.send((0, '/usr/bin/dpkg-query', ''))
+    assert "sudo /usr/bin/apt-get update" == result.send(
+            (0, "foo==1.1.1\nwget==1.0.1", ""))
+    cmd = result.send((0, "", ""))
+    assert "sudo /usr/bin/apt-get upgrade wget=1.13.4" == cmd
+    cmd = result.send((0, "", ""))
+    assert "sudo /usr/bin/apt-get install finger" == cmd
+
+    git_provider = GitProvider(
+        params=dict(origin='git@github.com/pajaco/spaces',
+                    path='~/spaces', ignore=['*.swp']))
+    result = git_provider.provide()
+    assert "which git" == result.next()
+    assert "test -d ~/spaces" == result.send((0, '/usr/bin/git', ''))
+    cmd = result.send((1, "", ""))
+    assert "/usr/bin/git clone git@github.com/pajaco/spaces ~/spaces" == cmd
+    cmd = result.send((0, "", ""))
+    assert "cat >>~/spaces/.git/info/exclude <<EOF*.swp\nEOF" == cmd
