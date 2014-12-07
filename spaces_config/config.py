@@ -12,9 +12,7 @@ Regular ini rules, except:
 
 from ConfigParser import (ConfigParser, NoOptionError, Error,
                           NoSectionError, MAX_INTERPOLATION_DEPTH)
-from StringIO import StringIO
 import re
-import ipdb
 
 
 class SpacesConfigParser(ConfigParser):
@@ -48,7 +46,6 @@ class SpacesConfigParser(ConfigParser):
                 out.append(m.group(1))
 
         return set(out)
-        pass
 
     def getprovider(self, section):
         return self.get(section, self._PROVIDER_OPT)
@@ -90,20 +87,15 @@ class SpacesConfigParser(ConfigParser):
             for option in reversed(sorted(self.options(s))):
                 if o.startswith(option):
                     v = self.get(s, option, raw=True)
-                    print v
                     return v + o[len(option):]
             raise NoOptionError(s, o)
         else:
             raise NoSectionError(s)
 
 
-def get_dependency_graph(config):
-    graph = {}
-    for section in config.sections():
-        graph[section] = config.getuses(section)
-    return graph
 
 if __name__ == "__main__":
+    from StringIO import StringIO
     cfg = """
 [test section 1]
 testkeya:   1
@@ -131,4 +123,3 @@ _provider: FooProvider
     print config.getuses('test section 2')
     #print config.getprovider('test section 1')
     #print config.getprovider('test section 2')
-    #print get_dependency_graph(config)
