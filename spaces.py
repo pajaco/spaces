@@ -1,8 +1,13 @@
+#!/usr/bin/env python
+
 import sys, os, time
 from spaces_config import config
 from providers import providers
+#from helpers import get_message, make_message
+import SocketServer
 import toposort
 import ipdb
+import re
 
 reserved_option_names = ['_uses', '_provider']
 
@@ -32,81 +37,79 @@ def get_providers(config):
         _providers.append(provider(params))
     return _providers
 
-def send_error(pipe, error):
-    with open(pipe, 'w') as stream:
-        print "Sending: %s" % error
-        stream.write('ERR %s' % error)
+def parse_result(data):
+    parts = {}
+    ctx = None
+    for line in data.split("\n"):
+        if line.startswith("STATUS"):
+            parts['STATUS'] = line.split(" ", 1)[1].strip()
+        elif line.startswith("STDOUT"):
+            parts['STDOUT'] = []
+            ctx = "STDOUT"
+        elif line.startswith("STDERR"):
+            parts['STDERR'] = []
+            ctx = "STDERR"
+        else:
+            parts[ctx].append(line)
 
-def send_end(pipe):
-    with open(pipe, 'w') as stream:
-        print "Sending: END"
-        stream.write('END')
+    return parts['STATUS'], parts['STDOUT'], parts['STDERR']
 
-def send_command(pipe, command):
-    with open(pipe, 'w') as stream:
-        print "Sending: CMD %s" % command
-        stream.write('CMD %s' % command)
+def is_provide_request(data):
+    return data.startswith("PROVIDE")
 
-def send_info(pipe, info):
-    with open(pipe, 'w') as stream:
-        print "Sending: INF %s" % info
-        stream.write('INF %s' % info)
 
-def receive_command(pipe):
-    with open(pipe, 'r') as stream:
-        data = stream.readline()[:-1]
-        if not data.startswith('CMD ') or data[4:] not in ['provide', 'revert']:
-            pass  #TODO handle error
-        print "Received: %s" % data
-        return data[4:]
+class SpaceState(object):
+    def __init__(self, cfg_file):
+        self.providers = get_providers(get_config(cfg_file))
 
-def receive_status(pipe):
-    with open(pipe, 'r') as stream:
-        data = stream.readline()[:-1]
-        if not data.startswith('XST '):
-            pass  #TODO handle error
-        print "Received: %s" % data
-        return int(data[4:])
+    def dispense(self, data):
+        if data.startswith("PROVIDE"):
+            self._providers = iter(self.providers)
+            self._curr_provider = None
+            self._curr_gen = None
+            self._provision_type = 'provide'
+        elif data.startswith("REVERT"):
+            self._providers = iter(self.providers)
+            self._curr_provider = None
+            self._curr_gen = None
+            self._provision_type = 'revert'
 
-def receive_stdout(pipe):
-    with open(pipe, 'r') as stream:
-        data = stream.readline()[:-1]
-        if not data.startswith('STO '):
-            pass  #TODO handle error
-        print "Received: %s" % data
-        return data[4:]
+        if not self._curr_provider:
+            try:
+                self._curr_provider = self._providers.next()
+            except StopIteration:
+                return "END"
+        if self._curr_gen is None:
+            method = getattr(self._curr_provider, self._provision_type)
+            self._curr_gen = method()
+            cmd = self._curr_gen.next()
+            return "DESC %s\n\nCMD %s" % (method.__doc__, cmd)
+        else:
+            try:
+                return self._curr_gen.send(parse_result(data))
+            except StopIteration:
+                self._curr_provider = None
+                self._curr_gen = None
+                return self.dispense(data)
 
-def receive_stderr(pipe):
-    with open(pipe, 'r') as stream:
-        data = stream.readline()[:-1]
-        if not data.startswith('STE '):
-            pass  #TODO handle error
-        print "Received: %s" % data
-        return data[4:]
+
+class SpacesTCPHandler(SocketServer.BaseRequestHandler):
+    def setup(self):
+        self.data = ""
+    def handle(self):
+        while True:
+            data = self.request.recv(1024)
+            if data == '':
+                break
+            self.data += data.strip()
+            print "{} wrote: {}\n".format(self.client_address[0], data)
+
+        out = self.server.state.dispense(self.data)
+        self.request.send(out)
 
 if __name__ == "__main__":
     cfg_file = sys.argv[1]
-    in_pipe = sys.argv[2]
-    out_pipe = sys.argv[3]
-
-    providers = get_providers(get_config(cfg_file))
-    space_cmd = receive_command(in_pipe)
-    for provider in providers:
-        fn = getattr(provider, space_cmd)
-        send_info(out_pipe, fn.__doc__)
-        cmd_gen = fn()
-        # first command goes without passing data back
-        send_command(out_pipe, cmd_gen.next())
-        while True:
-            rcode = receive_status(in_pipe)
-            stdout = receive_stdout(in_pipe)
-            stderr = receive_stderr(in_pipe)
-            try:
-                send_command(out_pipe, cmd_gen.send((rcode, stdout, stderr)))
-            except StopIteration:
-                #TODO handle last rcode, stdout, stderr
-                break
-            
-    send_end(out_pipe)
-
-
+    HOST, PORT = "localhost", 5007
+    server = SocketServer.TCPServer((HOST, PORT), SpacesTCPHandler)
+    server.state = SpaceState(cfg_file)
+    server.serve_forever()

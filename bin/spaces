@@ -1,95 +1,27 @@
 #!/bin/bash
 
+
+SPACES_DIR=~/.spaces
+SPACES_PY=~/work/spaces
+source $SPACES_PY/venv/bin/activate
+
 space(){
-    # commands list, enter, leave, describe
-    case "$1" in
-        list)
-            list-spaces
-            ;;
-        enter)
-#            if ! "$2"; then
-#                echo "Choose the space to enter from"
-#                list-spaces
-#            else
-                enter-space $2
-#            fi
-            ;;
-        leave)
-            leave-space
-            ;;
-        describe)
-            describe-space
-            ;;
-        *)
-            echo "Choose one of list|enter|leave|describe"
-            ;;
-    esac
+    #./spaces.py $1
+    PID=$!
+    RESP=`echo -e "PROVIDE" | nc localhost 5007`
+    echo $RESP
+    echo $RESP | grep "^DESC\b" | cut -d" " -f2- | xargs
+    RESP=`nc localhost 5007`
+    echo $RESP
 }
 
-list-spaces(){
-    spaces=$(ls ~/.spaces/scripts)
-    if [ "$spaces" = "" ]; then
-        echo "No spaces defined"
-    else
-        echo $spaces
-    fi
+_parse_DESC() {
+    echo $1 | grep "^DESC\b" | cut -d" " -f2- | xargs
 }
-list-spacedefs(){
-    spaces=$(ls ~/.spaces/defs)
+_parse_CMD() {
+    echo $1 | grep "^CMD\b" | cut -d" " -f2- | xargs
+}
+_output_STDOUT() {
+    awk '{print "STDOUT\n$0}'
 }
 
-enter-space(){
-    PROCEED = true
-    REVERT = false
-}
-
-leave-space(){
-    true
-}
-describe-space(){
-    true
-}
-
-# template functions
-# TODO move to separate script
-block-require-test(){
-    if $PROCEED; then
-        if ! eval $1; then
-            PROCEED=false
-        fi
-    fi
-}
-step-test() {
-    if $PROCEED || $REVERT; then
-        if eval $1; then
-            true
-        else
-            PROCEED=false
-        fi
-    fi
-}
-
-step-desc() {
-    echo $1
-}
-step-do(){
-    if $PROCEED || $REVERT; then
-        if eval $1; then
-            ""
-        else
-            PROCEED=false
-        fi
-    fi
-}
-step-revert(){
-    if ! $PROCEED; then
-        REVERT=true
-    fi
-}
-step-end(){
-    # cleanup, whatever
-    REVERT=false
-    if ! $PROCEED; then
-        true # stop here
-    fi
-}
