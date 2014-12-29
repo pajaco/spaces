@@ -35,11 +35,18 @@ class EnvProvider(object):
         self._backup = {}
 
     def _save_current_vars(self, stdout):
-        lines = stdout.split("\n")
+        if isinstance(stdout, str):
+            lines = stdout.split("\n")
+        else:
+            lines = stdout
         for line in lines:
-            name, value = line.split("=", 1)
-            if name in self._env_vars:
-                self._backup[name] = value
+            try:
+                name, value = line.split("=", 1)
+                if name in self._env_vars:
+                    self._backup[name] = value
+            except ValueError:
+                pass
+
 
     def _get_export_commands(self):
         names = self._env_vars.keys()
@@ -61,10 +68,13 @@ class EnvProvider(object):
             yield "export %s=%s" % (var, val)
         if self._backup:
             backup_keys = self._backup.keys()
-            yield "unset %s" % " ".join([var for var in self._env_vars.keys()
-                                         if var not in backup_keys])
+            to_unset = [var for var in self._env_vars.keys()
+                        if var not in backup_keys]
+            if to_unset:
+                yield "unset %s" % " ".join(to_unset)
         else:
-            yield "unset %s" % " ".join(self._env_vars.keys())
+            if self._env_vars:
+                yield "unset %s" % " ".join(self._env_vars.keys())
 
 
 class VirtualenvProvider(object):
